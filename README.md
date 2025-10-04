@@ -10,8 +10,8 @@
   ![window-light.png](https://raw.githubusercontent.com/digit1024/msToDO/main/res/screenshots/window-light.png#gh-light-mode-only)
   ![window-dark.png](https://raw.githubusercontent.com/digit1024/msToDO/main/res/screenshots/window-dark.png#gh-dark-mode-only)
 
-  <a href='https://flathub.org/apps/com.github.digit1024.ms-todo-app'>
-    <img width='200' alt='Get it on Flathub' src='https://flathub.org/api/badge?locale=en'/>
+  <a href='https://github.com/digit1024/msToDO/releases'>
+    <img width='200' alt='Download Flatpak Release' src='https://img.shields.io/badge/Download-Flatpak%20Release-blue?style=for-the-badge&logo=flatpak&logoColor=white'/>
   </a>
 </div>
 
@@ -45,7 +45,42 @@ cd msToDO
 cargo build
 ```
 
-# Flatpak
+# CLI Usage
+
+MS TODO App includes a comprehensive command-line interface for automation and scripting:
+
+```bash
+# GUI mode (no arguments)
+./ms-todo-app
+
+# CLI mode (with commands)
+./ms-todo-app lists --include-virtual
+./ms-todo-app tasks <list-id> --today
+./ms-todo-app create --list <list-id> --title "New task" --due-date "2025-10-15"
+./ms-todo-app update <task-id> --status finished
+./ms-todo-app delete <task-id> --yes
+```
+
+**Features:**
+- 📋 List management and task queries
+- ✅ Create, update, and delete tasks
+- 🎯 Filter by date, status, and keywords
+- 📊 JSON output for scripting (`-o json`)
+- 🔄 POSIX exit codes for automation
+- 🤖 Perfect for cron jobs and shell scripts
+
+See [CLI_USAGE.md](CLI_USAGE.md) for detailed documentation and scripting examples.
+
+# Flatpak Installation
+
+Download the latest Flatpak release from the [Releases page](https://github.com/digit1024/msToDO/releases) and install it:
+
+```bash
+# Download the .flatpak file from the latest release
+flatpak install --user ms-todo-app_v.1.0.flatpak
+```
+
+## Building from Source
 
 To build the cargo sources for the Flatpak manifest:
 

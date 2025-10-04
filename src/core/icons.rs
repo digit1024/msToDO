@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
+use tracing::info;
 
 pub(crate) static ICON_CACHE: OnceLock<Mutex<IconCache>> = OnceLock::new();
 
@@ -27,7 +28,8 @@ pub struct IconCache {
 impl IconCache {
     pub fn new() -> Self {
         let mut bundled_icons = std::collections::HashSet::new();
-        let icons_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("res/icons/bundled");
+
+        let icons_dir = get_bundled_icons_path();
         if let Ok(entries) = fs::read_dir(icons_dir) {
             for entry in entries.flatten() {
                 if let Some(name) = entry.file_name().to_str() {
@@ -52,8 +54,7 @@ impl IconCache {
             return icon::icon(entry.handle.clone()).size(size);
         }
         let (handle, bytes) = if self.bundled_icons.contains(name) {
-            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join(format!("res/icons/bundled/{}.svg", name));
+            let path = get_bundled_icons_path().join(format!("{}.svg", name));
             let data = fs::read(&path).expect("Failed to read bundled icon");
             let handle = icon::from_svg_bytes(data.clone()).symbolic(true);
             (handle, Some(data))
@@ -69,14 +70,21 @@ impl IconCache {
         );
         icon::icon(handle).size(size)
     }
-
 }
-
-// Removed enumeration helpers used only by the icon picker dialog
 
 pub fn get_icon(name: &str, size: u16) -> icon::Icon {
     let mut icon_cache = ICON_CACHE.get().unwrap().lock().unwrap();
     icon_cache.get_icon(name, size)
+}
+fn get_bundled_icons_path() -> PathBuf {
+    // Check if we're running in Flatpak (installed location)
+    let flatpak_path = PathBuf::from("/app/res/icons/bundled");
+    if flatpak_path.exists() {
+        flatpak_path
+    } else {
+        // Development mode - use source directory
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("res/icons/bundled")
+    }
 }
 
 pub fn get_handle(name: &str, size: u16) -> icon::Handle {
@@ -89,9 +97,9 @@ pub fn get_handle(name: &str, size: u16) -> icon::Handle {
         return entry.handle.clone();
     }
     let (handle, bytes) = if icon_cache.bundled_icons.contains(name) {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join(format!("res/icons/bundled/{}.svg", name));
-        let data = fs::read(&path).expect("Failed to read bundled icon");
+        let path = get_bundled_icons_path().join(format!("{}.svg", name));
+        let data =
+            fs::read(&path).expect(format!("Failed to read bundled icon {name}").as_str());
         let handle = icon::from_svg_bytes(data.clone()).symbolic(true);
         (handle, Some(data))
     } else {
