@@ -60,15 +60,30 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// List all todo lists
-    /// 
+    ///
     /// Shows all your Microsoft Todo lists with task counts.
     /// Use --include-virtual to also see system lists like "My Day" and "Planned".
-    /// 
+    ///
     /// EXAMPLES:
     ///   ms-todo-app lists
     ///   ms-todo-app lists --include-virtual
     ///   ms-todo-app lists -o json | jq -r '.data.id'
     Lists {
+        /// Include virtual lists (Today, Overdue, Completed)
+        #[arg(long)]
+        include_virtual: bool,
+    },
+
+    /// List all todo lists (alias for 'lists')
+    ///
+    /// Shows all your Microsoft Todo lists with task counts.
+    /// Use --include-virtual to also see system lists like "My Day" and "Planned".
+    ///
+    /// EXAMPLES:
+    ///   ms-todo-app list
+    ///   ms-todo-app list --include-virtual
+    ///   ms-todo-app list -o json | jq -r '.data.id'
+    List {
         /// Include virtual lists (Today, Overdue, Completed)
         #[arg(long)]
         include_virtual: bool,

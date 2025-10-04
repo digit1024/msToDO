@@ -37,6 +37,7 @@ pub async fn execute_command(
 
     match command {
         Commands::Lists { include_virtual } => cmd_lists(&mut storage, include_virtual, writer).await,
+        Commands::List { include_virtual } => cmd_lists(&mut storage, include_virtual, writer).await,
         Commands::Tasks { list_id, filter, today, include_finished } => {
             cmd_tasks(&mut storage, &list_id, filter.as_deref(), today, include_finished, writer).await
         }

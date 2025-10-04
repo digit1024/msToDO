@@ -25,7 +25,6 @@ pub struct LocalStorage {
 impl LocalStorage {
     pub fn new(_application_id: &str) -> Result<Self, LocalStorageError> {
         // For MS Graph, we need to get the auth token
-        // This is a simplified approach - in practice, you'd want to get this from the auth system
         let auth = MsTodoAuth::new().map_err(|e| {
             LocalStorageError::LocalStorageDirectoryCreationFailed(std::io::Error::new(
                 std::io::ErrorKind::Other,
@@ -33,11 +32,8 @@ impl LocalStorage {
             ))
         })?;
 
-        if !auth.has_valid_tokens() {
-            return Err(LocalStorageError::LocalStorageDirectoryCreationFailed(
-                std::io::Error::new(std::io::ErrorKind::Other, "No valid tokens"),
-            ));
-        }
+        // Don't check has_valid_tokens() here - let get_access_token() handle validation and refresh
+        // This allows automatic token refresh to work on each API call
 
         Ok(Self {
             http_client: MsTodoHttpClient::new(),
