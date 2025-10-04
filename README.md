@@ -69,7 +69,7 @@ MS TODO App includes a comprehensive command-line interface for automation and s
 - 🔄 POSIX exit codes for automation
 - 🤖 Perfect for cron jobs and shell scripts
 
-See [CLI_USAGE.md](CLI_USAGE.md) for detailed documentation and scripting examples.
+
 
 # Flatpak Installation
 
