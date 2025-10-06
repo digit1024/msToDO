@@ -26,6 +26,7 @@ pub enum Action {
     SortByDateAsc,
     SortByDateDesc,
     RefreshLists,
+    RefreshCacheCounts,
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +69,7 @@ pub enum TasksAction {
 
     FetchTasksAsync(List),                   // Fetch tasks for a list
     TasksFetched(Result<Vec<Task>, String>), // Tasks result
+    RefreshListAsync(List),                  // Force refresh from API
 
     // Checklist actions
     AddChecklistItemAsync(String),                       // item title
@@ -111,6 +113,7 @@ impl MenuAction for Action {
             Action::SortByNameDesc => Message::Application(ApplicationAction::SortByNameDesc),
             Action::SortByDateAsc => Message::Application(ApplicationAction::SortByDateAsc),
             Action::SortByDateDesc => Message::Application(ApplicationAction::SortByDateDesc),
+            Action::RefreshCacheCounts => Message::RefreshCacheCounts,
         }
     }
 }

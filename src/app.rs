@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod channels;
 pub mod context;
 pub mod dialog;
 pub mod error;
@@ -28,10 +29,12 @@ use cosmic::{
     },
     Application, ApplicationExt, Element,
 };
+use tracing::info;
 
 use crate::{
     app::{
         actions::{Action, ApplicationAction, NavMenuAction, TasksAction},
+        channels::{init_channels, CacheUpdateSignal},
         context::ContextPage,
         dialog::{DateTimeInfo, DialogAction, DialogPage},
     },
@@ -77,6 +80,8 @@ pub enum Message {
     OperationStarted,
     OperationCompleted,
     OperationFailed,
+    CacheUpdate(CacheUpdateSignal),
+    RefreshCacheCounts,
 }
 
 impl TasksApp {
@@ -172,6 +177,52 @@ impl TasksApp {
         self.running_operations
     }
 
+    fn update_cache_counts(&mut self) {
+        let all_tasks = self.storage.task_cache.get_all_tasks();
+        
+        // Collect entities and their data first to avoid borrow checker issues
+        let entities_and_lists: Vec<_> = self.nav_model.iter()
+            .filter_map(|entity| {
+                self.nav_model.data::<List>(entity).map(|list| (entity, list.clone()))
+            })
+            .collect();
+        
+        // Update counts for all lists in nav_model
+        for (entity, list) in entities_and_lists {
+            let count = if list.is_virtual {
+                // Calculate virtual list counts
+                match list.virtual_type.as_ref() {
+                    Some(crate::storage::models::VirtualListType::MyDay) => {
+                        self.storage.filter_my_day_tasks(&all_tasks).len()
+                    }
+                    Some(crate::storage::models::VirtualListType::Planned) => {
+                        self.storage.filter_planned_tasks(&all_tasks).len()
+                    }
+                    Some(crate::storage::models::VirtualListType::All) => {
+                        self.storage.filter_all_tasks(&all_tasks).len()
+                    }
+                    None => 0,
+                }
+            } else {
+                // Count tasks for regular lists (respect hide_completed setting)
+                all_tasks.iter()
+                    .filter(|task| {
+                        task.list_id.as_ref() == Some(&list.id) &&
+                        (list.hide_completed == false || task.status != crate::storage::models::Status::Completed)
+                    })
+                    .count()
+            };
+            
+            // Update the display text
+            let text = if count > 0 {
+                format!("({}) {}", count, list.name)
+            } else {
+                list.name.clone()
+            };
+            self.nav_model.text_set(entity, text);
+        }
+    }
+
     fn update_content(
         &mut self,
         tasks: &mut Vec<cosmic::Task<cosmic::Action<Message>>>,
@@ -233,6 +284,9 @@ impl TasksApp {
                 }
                 content::Output::FetchTasksAsync(list) => {
                     tasks.push(self.update(Message::Tasks(TasksAction::FetchTasksAsync(list))));
+                }
+                content::Output::RefreshListAsync(list) => {
+                    tasks.push(self.update(Message::Tasks(TasksAction::RefreshListAsync(list))));
                 }
             }
         }
@@ -598,9 +652,16 @@ impl TasksApp {
                 match result {
                     Ok(lists) => {
                         self.update_lists(lists);
-                        // for list in lists {
-                        //     self.create_nav_item(&list);
-                        // }
+                        
+                        // Spawn a task to refresh cache counts after parallel fetching
+                        tasks.push(cosmic::task::future(async move {
+                            // Wait a bit for parallel fetching to complete
+                            tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+                            
+                            // Send a message to refresh cache counts
+                            cosmic::Action::App(Message::RefreshCacheCounts)
+                        }));
+                        
                         if self.nav_model.active_data_mut::<List>().is_none() {
                             let Some(entity) = self.nav_model.iter().next() else {
                                 return;
@@ -687,6 +748,8 @@ impl TasksApp {
                         tasks.push(
                             self.update(Message::Content(content::Message::TaskCreated(task))),
                         );
+                        // Refresh cache counts
+                        tasks.push(self.update(Message::RefreshCacheCounts));
                     }
                     Err(error) => {
                         tracing::error!("Failed to create task: {}", error);
@@ -716,6 +779,8 @@ impl TasksApp {
                                 current_list.clone(),
                             ))));
                         }
+                        // Refresh cache counts
+                        tasks.push(self.update(Message::RefreshCacheCounts));
                     }
                     Err(error) => {
                         tracing::error!("Failed to update task: {}", error);
@@ -740,6 +805,8 @@ impl TasksApp {
                     Ok(_) => {
                         // Task deleted successfully
                         tracing::info!("Task deleted successfully");
+                        // Refresh cache counts
+                        tasks.push(self.update(Message::RefreshCacheCounts));
                     }
                     Err(error) => {
                         tracing::error!("Failed to delete task: {}", error);
@@ -777,6 +844,19 @@ impl TasksApp {
                 
                 let mut storage = self.storage.clone();
                 let future = async move { storage.tasks(&list).await };
+                tasks.push(self.spawn_storage_operation(
+                    future,
+                    |tasks| Message::Tasks(TasksAction::TasksFetched(Ok(tasks))),
+                    |error| Message::Tasks(TasksAction::TasksFetched(Err(error))),
+                ));
+            }
+
+            TasksAction::RefreshListAsync(list) => {
+                // Start tracking this operation
+                self.start_operation();
+                
+                let mut storage = self.storage.clone();
+                let future = async move { storage.refresh_tasks(&list).await };
                 tasks.push(self.spawn_storage_operation(
                     future,
                     |tasks| Message::Tasks(TasksAction::TasksFetched(Ok(tasks))),
@@ -1094,6 +1174,9 @@ impl Application for TasksApp {
     }
 
     fn init(core: Core, flags: Self::Flags) -> (Self, app::Task<Self::Message>) {
+        // Initialize channels first
+        let _channel_manager = init_channels();
+        
         let nav_model = widget::segmented_button::ModelBuilder::default().build();
 
         let about = widget::about::About::default()
@@ -1347,6 +1430,31 @@ impl Application for TasksApp {
             }
             Message::OperationFailed => {
                 self.complete_operation();
+            }
+            Message::CacheUpdate(signal) => {
+                // Handle cache update signals
+                match signal {
+                    CacheUpdateSignal::ListTasksUpdated(_list_id) => {
+                        info!("🔄 Cache updated for list, updating UI counts");
+                        self.update_cache_counts();
+                    }
+                    CacheUpdateSignal::TaskUpdated(_, _) => {
+                        info!("🔄 Task updated, updating UI counts");
+                        self.update_cache_counts();
+                    }
+                    CacheUpdateSignal::TaskAdded(_, _) => {
+                        info!("🔄 Task added, updating UI counts");
+                        self.update_cache_counts();
+                    }
+                    CacheUpdateSignal::TaskRemoved(_, _) => {
+                        info!("🔄 Task removed, updating UI counts");
+                        self.update_cache_counts();
+                    }
+                }
+            }
+            Message::RefreshCacheCounts => {
+                info!("🔄 Refreshing cache counts");
+                self.update_cache_counts();
             }
         }
 

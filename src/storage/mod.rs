@@ -3,6 +3,7 @@ pub mod cache;
 
 use crate::{
     app::markdown::Markdown,
+    app::channels::{get_channel_manager, CacheUpdateSignal},
     storage::models::{List, Task, VirtualListType},
     storage::cache::TaskCache,
     Error, LocalStorageError, TasksError,
@@ -18,7 +19,7 @@ use crate::auth::ms_todo_auth::MsTodoAuth;
 pub struct LocalStorage {
     http_client: MsTodoHttpClient,
     auth: MsTodoAuth,
-    task_cache: TaskCache,
+    pub task_cache: TaskCache,
 }
 
 
@@ -52,24 +53,42 @@ impl LocalStorage {
         })
     }
 
+    /// Send cache update signal using global channel manager
+    fn send_cache_signal(&self, signal: CacheUpdateSignal) {
+        get_channel_manager().send_cache_update(signal);
+    }
+
     // Cache management methods
     async fn add_task_to_cache(&mut self, task: Task) -> Result<(), Error> {
-        self.task_cache.update_task(task);
+        self.task_cache.update_task(task.clone());
+        self.send_cache_signal(CacheUpdateSignal::TaskAdded(
+            task.id.clone(), 
+            task.list_id.clone().unwrap_or_default()
+        ));
         Ok(())
     }
     
     async fn update_task_in_cache(&mut self, task: Task) -> Result<(), Error> {
-        self.task_cache.update_task(task);
+        self.task_cache.update_task(task.clone());
+        self.send_cache_signal(CacheUpdateSignal::TaskUpdated(
+            task.id.clone(), 
+            task.list_id.clone().unwrap_or_default()
+        ));
         Ok(())
     }
     
     async fn remove_task_from_cache(&mut self, task_id: &str, list_id: &str) -> Result<(), Error> {
         self.task_cache.remove_task(task_id, list_id);
+        self.send_cache_signal(CacheUpdateSignal::TaskRemoved(
+            task_id.to_string(), 
+            list_id.to_string()
+        ));
         Ok(())
     }
     
     async fn update_cache_for_list(&mut self, list_id: &str, tasks: Vec<Task>) -> Result<(), Error> {
         self.task_cache.update_list_tasks(list_id, tasks);
+        self.send_cache_signal(CacheUpdateSignal::ListTasksUpdated(list_id.to_string()));
         Ok(())
     }
 
@@ -93,7 +112,7 @@ impl LocalStorage {
         Ok(tasks)
     }
     
-    fn filter_my_day_tasks(&self, tasks: &[Task]) -> Vec<Task> {
+    pub fn filter_my_day_tasks(&self, tasks: &[Task]) -> Vec<Task> {
         let today = chrono::Utc::now().date_naive();
         tasks.iter()
             .filter(|task| {
@@ -104,7 +123,7 @@ impl LocalStorage {
             .collect()
     }
     
-    fn filter_planned_tasks(&self, tasks: &[Task]) -> Vec<Task> {
+    pub fn filter_planned_tasks(&self, tasks: &[Task]) -> Vec<Task> {
         tasks.iter()
             .filter(|task| {
                 task.status != crate::storage::models::Status::Completed &&
@@ -114,7 +133,7 @@ impl LocalStorage {
             .collect()
     }
     
-    fn filter_all_tasks(&self, tasks: &[Task]) -> Vec<Task> {
+    pub fn filter_all_tasks(&self, tasks: &[Task]) -> Vec<Task> {
         tasks.iter()
             .filter(|task| task.status != crate::storage::models::Status::Completed)
             .cloned()
@@ -167,7 +186,39 @@ impl LocalStorage {
             return self.get_tasks_for_virtual_list(list).await;
         }
         
-        // For regular lists, fetch from API and update cache
+        // For regular lists, try cache first
+        let all_tasks = self.task_cache.get_all_tasks();
+        let mut cached_tasks: Vec<Task> = all_tasks
+            .into_iter()
+            .filter(|task| task.list_id.as_ref() == Some(&list.id))
+            .collect();
+        
+        // Apply hide_completed filter to cached tasks (consistent with API behavior)
+        if list.hide_completed {
+            cached_tasks.retain(|task| task.status != crate::storage::models::Status::Completed);
+        }
+        
+        // If we have cached tasks, return them immediately
+        if !cached_tasks.is_empty() {
+            info!("📋 Using cached tasks for list: {} ({} tasks, hide_completed: {})", 
+                  list.name, cached_tasks.len(), list.hide_completed);
+            return Ok(cached_tasks);
+        }
+        
+        // If no cached tasks, fetch from API
+        info!("🌐 No cached tasks found, fetching from API for list: {}", list.name);
+        self.refresh_tasks(list).await
+    }
+
+    /// Force refresh tasks from API (bypasses cache)
+    pub async fn refresh_tasks(&mut self, list: &List) -> Result<Vec<Task>, Error> {
+        // For virtual lists, use cache (they don't have API endpoints)
+        if list.is_virtual {
+            return self.get_tasks_for_virtual_list(list).await;
+        }
+        
+        info!("🔄 Force refreshing tasks from API for list: {}", list.name);
+        
         let auth_token = self
             .get_valid_token()
             .map_err(|_e| Error::Tasks(TasksError::TaskNotFound))?;
@@ -193,6 +244,7 @@ impl LocalStorage {
         // Update cache for this list
         self.update_cache_for_list(&list.id, tasks.clone()).await?;
 
+        info!("✅ Refreshed {} tasks from API for list: {}", tasks.len(), list.name);
         Ok(tasks)
     }
     pub async fn get_active_tasks(&self, list: &List) -> Result<Vec<Task>, Error> {
@@ -217,11 +269,90 @@ impl LocalStorage {
         Ok(tasks)
     }
 
-    #[allow(dead_code)]
-    pub fn sub_tasks(_task: &Task) -> Result<Vec<Task>, Error> {
-        // Skip sub-tasks for now as requested
-        Ok(Vec::new())
+    /// Fetch all tasks for a list (including completed ones)
+    async fn get_all_tasks_for_list(&self, list: &List) -> Result<Vec<Task>, Error> {
+        let auth_token = self
+            .get_valid_token()
+            .map_err(|_e| Error::Tasks(TasksError::TaskNotFound))?;
+
+        let url = format!("/me/todo/lists/{}/tasks?$orderby=createdDateTime desc", list.id);
+        let todo_tasks = self.fetch_all_todo_tasks(&url, &auth_token).await?;
+
+        // Convert TodoTask[] → Task[] with proper path construction
+        let tasks: Vec<Task> = todo_tasks
+            .into_iter()
+            .map(|todo_task| {
+                crate::integration::ms_todo::mapping::todo_task_to_task_with_path(
+                    todo_task, &list.id,
+                )
+            })
+            .collect();
+
+        Ok(tasks)
     }
+
+    /// Spawn parallel task fetching for all lists
+    pub async fn spawn_parallel_task_fetching(&self, lists: Vec<List>) -> Result<(), Error> {
+        let storage = self.clone();
+        
+        tokio::spawn(async move {
+            let mut handles = Vec::new();
+            let mut delay_counter = 0;
+            
+            for list in lists {
+                if !list.is_virtual {
+                    let storage_clone = storage.clone();
+                    let list_clone = list.clone();
+                    
+                    // Add a small delay between starting requests to avoid rate limiting
+                    if delay_counter > 0 {
+                        let jitter_delay = std::time::Duration::from_millis(100 * delay_counter);
+                        tokio::time::sleep(jitter_delay).await;
+                    }
+                    delay_counter += 1;
+                    
+                    let handle = tokio::spawn(async move {
+                        match storage_clone.get_all_tasks_for_list(&list_clone).await {
+                            Ok(tasks) => {
+                                info!("✅ Fetched {} tasks for list: {}", tasks.len(), list_clone.name);
+                                
+                                // Update cache
+                                let mut cache = storage_clone.task_cache.clone();
+                                cache.update_list_tasks(&list_clone.id, tasks.clone());
+                                
+                                // Send signal for UI update
+                                storage_clone.send_cache_signal(CacheUpdateSignal::ListTasksUpdated(list_clone.id));
+                                
+                                Ok(())
+                            }
+                            Err(e) => {
+                                error!("❌ Failed to fetch tasks for list {}: {}", list_clone.name, e);
+                                Err(e)
+                            }
+                        }
+                    });
+                    
+                    handles.push(handle);
+                }
+            }
+            
+            // Wait for all tasks to complete
+            for handle in handles {
+                if let Err(e) = handle.await {
+                    error!("Task fetch handle error: {:?}", e);
+                }
+            }
+            
+            info!("🎯 All parallel task fetching completed");
+            
+            // Send a final signal to update all UI counts
+            storage.send_cache_signal(CacheUpdateSignal::ListTasksUpdated("all".to_string()));
+        });
+        
+        Ok(())
+    }
+
+    
 
     /// Helper method to fetch all pages of todo lists with pagination
     async fn fetch_all_todo_lists(&self, auth_token: &str) -> Result<Vec<TodoTaskList>, Error> {
@@ -263,16 +394,11 @@ impl LocalStorage {
     }
 
     pub async fn lists(&mut self) -> Result<Vec<List>, Error> {
-        // Initialize cache if empty
-        if self.task_cache.is_empty() {
-            self.initialize_cache().await?;
-        }
-
         let auth_token = self
             .get_valid_token()
             .map_err(|_e| Error::Tasks(TasksError::ListNotFound))?;
 
-        // Use $expand to get tasks and $count for non-completed task count
+        // Fetch lists without task counts
         let response: TodoTaskListCollection = self
             .http_client
             .get(
@@ -282,35 +408,23 @@ impl LocalStorage {
             .await
             .map_err(|_e| Error::Tasks(TasksError::ListNotFound))?;
 
-        // Convert TodoTaskList[] → List[]
-        debug!("Response: {:?}", response);
+        // Convert TodoTaskList[] → List[] (without task counts)
         let mut lists = Vec::new();
         for tl in response.value {
-            let mut l = tl.into();
-            let tasks = self.get_active_tasks(&l).await.unwrap_or_default();
-
-            l.number_of_tasks = tasks.len() as u32;
-
+            let mut l: List = tl.into();
+            l.number_of_tasks = 0; // Will be updated later via cache signals
             lists.push(l);
         }
         
-        // Add virtual lists
+        // Add virtual lists (also without task counts initially)
         let virtual_lists = vec![
             List::new_virtual(VirtualListType::MyDay, "My Day"),
             List::new_virtual(VirtualListType::Planned, "Planned"),
             List::new_virtual(VirtualListType::All, "All"),
         ];
         
-        // Calculate task counts for virtual lists
-        let mut virtual_lists_with_counts = Vec::new();
-        for mut virtual_list in virtual_lists {
-            let tasks = self.get_tasks_for_virtual_list(&virtual_list).await.unwrap_or_default();
-            virtual_list.number_of_tasks = tasks.len() as u32;
-            virtual_lists_with_counts.push(virtual_list);
-        }
-        
         // Combine and sort: virtual lists first, then regular lists
-        lists.extend(virtual_lists_with_counts);
+        lists.extend(virtual_lists);
         lists.sort_by(|a, b| {
             if a.is_virtual && !b.is_virtual {
                 std::cmp::Ordering::Less
@@ -322,6 +436,14 @@ impl LocalStorage {
                 a.well_known_list_name.cmp(&b.well_known_list_name).then(a.name.cmp(&b.name))
             }
         });
+        
+        // Spawn parallel task fetching AFTER returning lists
+        let lists_for_fetching = lists.iter()
+            .filter(|l| !l.is_virtual)
+            .cloned()
+            .collect();
+        
+        self.spawn_parallel_task_fetching(lists_for_fetching).await?;
         
         Ok(lists)
     }

@@ -40,6 +40,9 @@ pub fn run_gui() -> cosmic::iced::Result {
     // Initialize settings
     settings::app::init();
     
+    // Initialize channels
+    crate::app::channels::init_channels();
+    
     info!("🚀 Starting Tasks app with Microsoft Todo integration...");
     
     // Check authentication first

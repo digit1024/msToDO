@@ -69,6 +69,7 @@ pub enum Message {
     ToggleSearchBar,
     SearchQueryChanged(String),
     SetSort(SortType),
+    RefreshList, // Force refresh from API
 
     // New async message variants
     TaskCreated(models::Task), // Task was created successfully
@@ -81,6 +82,7 @@ pub enum Message {
 pub enum Output {
     ToggleHideCompleted(models::List),
     Focus(widget::Id),
+    RefreshListAsync(models::List), // Force refresh from API,
     OpenTaskDetails(models::Task),
     FinishedTasksChanged,
 
@@ -132,16 +134,21 @@ impl Content {
             .padding(spacing.space_xxs)
             .on_press(Message::ToggleSearchBar);
 
+        let refresh_button = widget::button::icon(icons::get_handle("arrows-loop-symbolic", 18))
+            .padding(spacing.space_xxs)
+            .on_press(Message::RefreshList);
+
         let icon = crate::core::icons::get_icon(
             list.icon.as_deref().unwrap_or("view-list-symbolic"),
             spacing.space_m,
         );
-        widget::row::with_capacity(4)
+        widget::row::with_capacity(5)
             .align_y(Alignment::Center)
             .spacing(spacing.space_s)
             .padding([spacing.space_none, spacing.space_xxs])
             .push(icon)
             .push(widget::text::body(&list.name).size(24).width(Length::Fill))
+            .push(refresh_button)
             .push(hide_completed_button)
             .push(search_button)
             .into()
@@ -565,6 +572,12 @@ impl Content {
 
             Message::SetSort(sort_type) => {
                 self.sort_type = sort_type;
+            }
+
+            Message::RefreshList => {
+                if let Some(list) = &self.list {
+                    tasks.push(Output::RefreshListAsync(list.clone()));
+                }
             }
 
             // New async message handlers
